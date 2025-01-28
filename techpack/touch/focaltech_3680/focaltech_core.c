@@ -81,7 +81,6 @@ static void fts_ts_panel_notifier_callback(enum panel_event_notifier_tag tag,
  *****************************************************************************/
 static int fts_ts_suspend(struct device *dev);
 static int fts_ts_resume(struct device *dev);
-static void fts_power_supply_work(struct work_struct *work);
 
 #ifdef FTS_XIAOMI_TOUCHFEATURE
 static int fts_read_palm_data(void);
@@ -89,7 +88,6 @@ static int fts_read_and_report_foddata(struct fts_ts_data *data);
 static int fts_palm_sensor_cmd(int value);
 static void fts_palm_mode_recovery(struct fts_ts_data *ts_data);
 static void fts_game_mode_recovery(struct fts_ts_data *ts_data);
-static int fts_get_charging_status(void);
 
 #define ORIENTATION_0_OR_180 0 /* anticlockwise 0 or 180 degrees */
 #define NORMAL_ORIENTATION_90 1 /* anticlockwise 90 degrees in normal */
@@ -2039,116 +2037,42 @@ static int fts_parse_dt(struct device *dev, struct fts_ts_platform_data *pdata)
 	return 0;
 }
 
-static int fts_get_charging_status(void)
-{
-	struct power_supply *usb_psy;
-	struct power_supply *dc_psy;
-	union power_supply_propval val;
-	int ret = 0;
-	int is_charging = 0;
-
-	is_charging = !!power_supply_is_system_supplied();
-	if (!is_charging)
-		return 0;
-
-	dc_psy = power_supply_get_by_name("wireless");
-	if (dc_psy) {
-		ret = power_supply_get_property(dc_psy,
-						POWER_SUPPLY_PROP_ONLINE, &val);
-		if (ret < 0)
-			FTS_ERROR("Couldn't get DC online status, rc=%d\n",
-				  ret);
-		else if (val.intval == 1)
-			return 1;
-	}
-
-	usb_psy = power_supply_get_by_name("usb");
-	if (usb_psy) {
-		ret = power_supply_get_property(usb_psy,
-						POWER_SUPPLY_PROP_ONLINE, &val);
-		if (ret < 0)
-			FTS_ERROR("Couldn't get usb online status, rc=%d\n",
-				  ret);
-		else if (val.intval == 1)
-			return 1;
-	}
-
-	return 0;
-}
-
 /**
  * @brief Write 1/0 to Touch IC 0x8B register depending on whether it is in charge state
  */
 static void fts_power_supply_work(struct work_struct *work)
 {
 	int ret = 0;
-	struct fts_ts_data *ts_data =
-		container_of(work, struct fts_ts_data, power_supply_work);
-	int charger_status = -1;
+	int charger_status = 0;
+	struct fts_ts_data *ts_data = container_of(work, struct fts_ts_data, power_supply_work);
 
-	if (ts_data == NULL)
-		return;
 #if defined(CONFIG_PM) && FTS_PATCH_COMERR_PM
 	if (ts_data->pm_suspend) {
 		FTS_ERROR("TP is in suspend mode, don't set usb status!");
 		return;
 	}
 #endif
+
 	pm_stay_awake(ts_data->dev);
 
-	charger_status = !!fts_get_charging_status();
-	if (charger_status != ts_data->charger_status ||
-	    ts_data->charger_status < 0) {
+	charger_status = !!power_supply_is_system_supplied();
+	if (charger_status != ts_data->charger_status || ts_data->charger_status < 0) {
 		ts_data->charger_status = charger_status;
-		if (charger_status) {
-			FTS_INFO("charger usb in");
-			ret = fts_write_reg(FTS_REG_CHARGER_MODE_EN, true);
-			if (ret < 0) {
-				FTS_ERROR(
-					"failed to set power supply status:%d",
-					ts_data->charger_status);
-			} else {
-				FTS_INFO(
-					"success to set power supply status:%d",
-					ts_data->charger_status);
-			}
-		} else {
-			FTS_INFO("charger usb out");
-			ret = fts_write_reg(FTS_REG_CHARGER_MODE_EN, false);
-			if (ret < 0) {
-				FTS_ERROR(
-					"failed to set power supply status:%d",
-					ts_data->charger_status);
-			} else {
-				FTS_INFO(
-					"success to set power supply status:%d",
-					ts_data->charger_status);
-			}
-		}
+		ret = fts_write_reg(FTS_REG_CHARGER_MODE_EN, charger_status);
+		if (ret < 0)
+			FTS_ERROR("failed to set power supply status:%d", ts_data->charger_status);
 	}
+
 	pm_relax(ts_data->dev);
 }
-/**
- * @brief Charge mode callback function
- *
- * @param nb - Notification chain structure pointer
- * @param event - useless on here,Parameters passed in the notification side
- * @param ptr - useless on here,The pointer passed in on the notification side
- * @return int
- */
+
 static int fts_power_supply_callback(struct notifier_block *nb,
 				     unsigned long event, void *ptr)
 {
-	/*
- * Find the first address of the variable of type struct fts_ts_data
- * through the power_supply notifier member of the structure nb
- */
 	struct fts_ts_data *ts_data =
 		container_of(nb, struct fts_ts_data, power_supply_notifier);
-	/* If the ts_data structure is found, insert the work into the work queue */
 
-	if (ts_data)
-		queue_work(ts_data->ts_workqueue, &ts_data->power_supply_work);
+	queue_work(ts_data->ts_workqueue, &ts_data->power_supply_work);
 
 	return 0;
 }
